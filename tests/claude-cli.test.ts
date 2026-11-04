@@ -15,6 +15,7 @@ import {
 } from "../src/claude-cli.ts";
 import type { NativeFrame } from "../src/native-types.ts";
 import { createClaudeCodeProvider } from "../src/provider.ts";
+import { executableNodeScript } from "./helpers.ts";
 
 type Block = Record<string, unknown>;
 type WireMessage = { role: string; content: unknown };
@@ -359,6 +360,21 @@ for (const key of [
     );
   });
 }
+
+test("auth status launches a fake Claude command from a path with spaces", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi claude command "));
+  try {
+    const script = join(root, "fake claude.mjs");
+    await writeFile(script, `#!/usr/bin/env node\nconsole.log(JSON.stringify({loggedIn: true, authMethod: "claude.ai", subscriptionType: "test"}));\n`);
+    const command = await executableNodeScript(script);
+    const status = await getClaudeStatus({ ...process.env, PI_CLAUDE_CODE_COMMAND: command });
+    assert.equal(status.available, true);
+    assert.equal(status.loggedIn, true);
+    assert.equal(status.subscription, true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("runs a request through a stream-json Claude executable with an inherited API key", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-claude-code-test-"));
