@@ -119,6 +119,8 @@ export class TurnRelay {
   requestId?: string;
   failure?: string;
   errorBody = Buffer.alloc(0);
+  /** Upstream rate-limit headers only (no auth/cookies), for usage-limit reporting. */
+  rateLimitHeaders: Record<string, string> = {};
   originalRequestBody?: Buffer;
   requestBody?: Buffer;
 
@@ -175,6 +177,7 @@ export class TurnRelay {
     this.requestId = undefined;
     this.failure = undefined;
     this.errorBody = Buffer.alloc(0);
+    this.rateLimitHeaders = {};
     this.originalRequestBody = undefined;
     this.requestBody = undefined;
     this.transformRequest = transformRequest;
@@ -302,6 +305,11 @@ export class TurnRelay {
       });
       this.sockets.add(upstreamResponse);
       this.status = upstreamResponse.statusCode;
+      for (const [name, value] of Object.entries(upstreamResponse.headers)) {
+        if (/^anthropic-ratelimit-unified-|^retry-after$/u.test(name) && value !== undefined) {
+          this.rateLimitHeaders[name] = Array.isArray(value) ? value.join(",") : String(value);
+        }
+      }
       this.requestId =
         String(upstreamResponse.headers["request-id"] ?? upstreamResponse.headers["x-request-id"] ?? "") || undefined;
 
@@ -323,7 +331,11 @@ export class TurnRelay {
       if (this.status === 200) this.capture.finish();
       response.end();
     } catch (error) {
-      this.failure = error instanceof Error ? error.name : "UnknownError";
+      // Preserve the actionable cause, not just "Error". Bound the diagnostic;
+      // never include request headers, bodies or a stack trace.
+      this.failure = error instanceof Error ? `${error.name}: ${error.message}`
+        .replace(/Bearer\s+\S+|sk-ant-[A-Za-z0-9_-]+/giu, "[redacted]")
+        .replace(/\s+/gu, " ").slice(0, 500) : "UnknownError";
       if (!response.headersSent) response.writeHead(this.cancelled ? 499 : 502).end();
       else response.destroy();
     } finally {

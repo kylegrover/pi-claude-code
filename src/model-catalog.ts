@@ -25,6 +25,7 @@ const BUILTIN_ANTHROPIC_MODELS: Record<string, Model<"anthropic-messages">> = Ob
 const NATIVE_ROUTE_BY_ID = new Map<string, string>();
 const NATIVE_TOOL_CHANGES_BY_ID = new Map<string, boolean>();
 const ADAPTIVE_THINKING_BY_ID = new Map<string, boolean>();
+const REQUIRED_THINKING_BY_ID = new Map<string, boolean>();
 
 const FALLBACK_DISCOVERY: DiscoveredClaudeModel[] = [
   {
@@ -140,6 +141,7 @@ export function modelFromDiscovery(info: DiscoveredClaudeModel): ClaudeCodeModel
   NATIVE_ROUTE_BY_ID.set(id, info.value);
   NATIVE_TOOL_CHANGES_BY_ID.set(id, builtin?.compat?.supportsMidConvoToolChanges === true);
   ADAPTIVE_THINKING_BY_ID.set(id, info.supportsAdaptiveThinking === true);
+  REQUIRED_THINKING_BY_ID.set(id, builtin?.compat?.forceAdaptiveThinking === true && builtin.thinkingLevelMap?.off === null);
   return builtin ? fromBuiltin(info, id, builtin) : fallbackModel(info, id);
 }
 
@@ -162,6 +164,14 @@ function canonicalRoute(model: string): string {
 export function supportsAdaptiveThinking(model: string): boolean {
   const canonical = canonicalRoute(model);
   return ADAPTIVE_THINKING_BY_ID.get(model) ?? ADAPTIVE_THINKING_BY_ID.get(canonical) ?? true;
+}
+
+/** Summary calls can omit reasoning even when the model explicitly disallows thinking off. */
+export function requiresAdaptiveThinking(model: string): boolean {
+  const canonical = canonicalRoute(model);
+  return REQUIRED_THINKING_BY_ID.get(model) ?? REQUIRED_THINKING_BY_ID.get(canonical) ??
+    (BUILTIN_ANTHROPIC_MODELS[canonical]?.compat?.forceAdaptiveThinking === true &&
+      BUILTIN_ANTHROPIC_MODELS[canonical]?.thinkingLevelMap?.off === null);
 }
 
 /** Whether Anthropic currently accepts native mid-conversation tool blocks for this route. */

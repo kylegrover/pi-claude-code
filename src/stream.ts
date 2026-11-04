@@ -16,8 +16,9 @@ import {
   type TranscriptContext,
 } from "@earendil-works/pi-ai";
 import { describeUsageCreditsRejection } from "./billing.ts";
+import { USAGE_LIMIT_DIAGNOSTIC, UsageLimitError } from "./usage-limit.ts";
 import { runClaudeRequest } from "./claude-cli.ts";
-import { nativeModel, supportsNativeToolChanges } from "./model-catalog.ts";
+import { nativeModel, requiresAdaptiveThinking, supportsNativeToolChanges } from "./model-catalog.ts";
 import type { AnthropicStreamEvent, NativeContentBlock, NativeMessage, NativeUsage } from "./native-types.ts";
 import {
   buildExtraBody,
@@ -27,6 +28,7 @@ import {
   NATIVE_TOOL_CHANGES_BETA,
   prepareFrames,
   prepareNativeTranscript,
+  prepareReplayMessages,
   prepareTools,
   TOOL_PREFIX,
 } from "./transcript.ts";
@@ -122,7 +124,7 @@ function comparableContent(content: AssistantMessage["content"]): unknown[] {
   });
 }
 
-function nativeContent(content: NativeContentBlock[], toolNames: Set<string>): AssistantMessage["content"] {
+function nativeContent(content: NativeContentBlock[]): AssistantMessage["content"] {
   const converted: AssistantMessage["content"] = [];
   for (const block of content) {
     if (block.type === "text") {
@@ -143,14 +145,13 @@ function nativeContent(content: NativeContentBlock[], toolNames: Set<string>): A
     } else if (block.type === "tool_use") {
       if (!block.name.startsWith(TOOL_PREFIX)) throw new Error(`Claude Code returned unexpected tool ${block.name}`);
       const name = block.name.slice(TOOL_PREFIX.length);
-      if (!toolNames.has(name)) throw new Error(`Claude Code returned unavailable tool ${name}`);
       converted.push({ type: "toolCall", id: block.id, name, arguments: block.input as never });
     }
   }
   return converted;
 }
 
-class EventTranslator {
+export class EventTranslator {
   private readonly nativeToContent = new Map<number, number>();
   private sawContentEvent = false;
 
@@ -195,7 +196,7 @@ class EventTranslator {
     initialUserPrefix?: unknown[],
     initialSystemMessages?: unknown[],
   ): void {
-    const authoritative = nativeContent(message.content, this.toolNames);
+    const authoritative = nativeContent(message.content);
     if (!this.sawContentEvent) {
       this.emitComplete(authoritative);
     } else if (JSON.stringify(comparableContent(this.output.content)) !== JSON.stringify(comparableContent(authoritative))) {
@@ -211,6 +212,8 @@ class EventTranslator {
     this.output.diagnostics = [
       ...(this.output.diagnostics ?? []),
       makeReplayDiagnostic(message, this.output, initialUserPrefix, initialSystemMessages) as never,
+      ...authoritative.flatMap(block => block.type === "toolCall" && !this.toolNames.has(block.name)
+        ? [{ type: "claude-code.unavailable-tool", timestamp: Date.now(), details: { name: block.name } }] : []),
     ];
   }
 
@@ -241,7 +244,8 @@ class EventTranslator {
     } else if (native.type === "tool_use") {
       if (!native.name.startsWith(TOOL_PREFIX)) throw new Error(`Claude Code returned unexpected tool ${native.name}`);
       const name = native.name.slice(TOOL_PREFIX.length);
-      if (!this.toolNames.has(name)) throw new Error(`Claude Code returned unavailable tool ${name}`);
+      // Let Pi return its ordinary "tool not found" result. Throwing here tears
+      // down a charged SSE response before its final usage can be captured.
       this.output.content.push({
         type: "toolCall",
         id: native.id,
@@ -347,6 +351,7 @@ export function streamClaudeCode(
 
   void (async () => {
     try {
+      context = { ...context, messages: prepareReplayMessages(context.messages, model) };
       const nativeTranscript = prepareNativeTranscript(
         context.messages,
         supportsNativeToolChanges(model.id),
@@ -395,7 +400,7 @@ export function streamClaudeCode(
         response.initialUserPrefix,
         response.initialSystemMessages,
       );
-      output.providerThinkingLevel = options?.reasoning;
+      output.providerThinkingLevel = options?.reasoning ?? (requiresAdaptiveThinking(model.id) ? "low" : undefined);
       output.diagnostics = [
         ...(output.diagnostics ?? []),
         {
@@ -422,6 +427,11 @@ export function streamClaudeCode(
     } catch (error) {
       output.stopReason = options?.signal?.aborted ? "aborted" : "error";
       output.errorMessage = normalizeError(error);
+      if (error instanceof UsageLimitError) {
+        // Machine-readable reset time for auto-continue extensions; the message stays human.
+        output.diagnostics = [...(output.diagnostics ?? []), { type: USAGE_LIMIT_DIAGNOSTIC, timestamp: Date.now(),
+          details: { ...error.details } as never }];
+      }
       for (const block of output.content) {
         delete (block as Partial<IndexedBlock>).nativeIndex;
         delete (block as Partial<IndexedToolCall>).partialJson;

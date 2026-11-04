@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { AssistantMessage, Message, Tool } from "@earendil-works/pi-ai";
+import type { AssistantMessage, Message, Model, Tool } from "@earendil-works/pi-ai";
 import {
   buildExtraBody,
   getInitialSystemMessages,
@@ -9,6 +9,7 @@ import {
   normalizeInputSchema,
   prepareFrames,
   prepareNativeTranscript,
+  prepareReplayMessages,
   prepareTools,
   TOOL_PREFIX,
 } from "../src/transcript.ts";
@@ -187,6 +188,85 @@ test("builds cache-stable native tool declarations and chronological system chan
     ),
     undefined,
   );
+});
+
+test("normalizes OpenAI replay IDs on both sides without changing saved messages", () => {
+  const model = { provider: "claude-code", api: "claude-code-stream-json", id: "sonnet" } as Model<any>;
+  const ids = ["call_first|fc_123", `call_second|ctc_${"x".repeat(100)}`, "already_valid"];
+  const assistant: AssistantMessage = {
+    role: "assistant",
+    api: "openai-responses",
+    provider: "openai",
+    model: "foreign-model",
+    content: ids.map((id) => ({ type: "toolCall", id, name: "read", arguments: { path: "a" } })),
+    usage,
+    stopReason: "toolUse",
+    timestamp: 1,
+  };
+  const messages: Message[] = [
+    { role: "user", content: "inspect", timestamp: 0 },
+    assistant,
+    ...ids.map((toolCallId): Message => ({
+      role: "toolResult", toolCallId, toolName: "read",
+      content: [{ type: "text", text: "result" }], isError: false, timestamp: 2,
+    })),
+    { role: "user", content: "continue", timestamp: 3 },
+  ];
+  const original = structuredClone(messages);
+  const prepared = prepareReplayMessages(messages, model);
+  const frames = prepareFrames(prepared);
+  const calls = frames[1]!.message.content as Array<{ id: string }>;
+  const results = frames[2]!.message.content.filter(
+    (block) => (block as { type: string }).type === "tool_result",
+  ) as Array<{ tool_use_id: string }>;
+  for (const call of calls) assert.match(call.id, /^[a-zA-Z0-9_-]{1,64}$/);
+  assert.deepEqual(calls.map((call) => call.id), results.map((result) => result.tool_use_id));
+  assert.equal(calls[2]?.id, "already_valid");
+  assert.equal(new Set(calls.map((call) => call.id)).size, ids.length);
+  assert.deepEqual(prepareReplayMessages(messages, model), prepared);
+  assert.deepEqual(messages, original);
+});
+
+test("drops foreign thinking and carriers but preserves same-model signed native replay", () => {
+  const model = { provider: "claude-code", api: "claude-code-stream-json", id: "sonnet" } as Model<any>;
+  const assistant: AssistantMessage = {
+    role: "assistant", api: model.api, provider: model.provider, model: model.id,
+    content: [
+      { type: "thinking", thinking: "private", thinkingSignature: "signed" },
+      { type: "text", text: "visible" },
+    ],
+    usage, stopReason: "stop", timestamp: 1,
+  };
+  const native = {
+    role: "assistant" as const,
+    content: [
+      { type: "thinking" as const, thinking: "private", signature: "signed", extra: "preserved" },
+      { type: "text" as const, text: "visible" },
+    ],
+  };
+  assistant.diagnostics = [makeReplayDiagnostic(native, assistant) as never];
+  const messages: Message[] = [
+    { role: "user", content: "go", timestamp: 0 }, assistant,
+    { role: "user", content: "continue", timestamp: 2 },
+  ];
+  const original = structuredClone(messages);
+  const own = prepareFrames(prepareReplayMessages(messages, model));
+  assert.deepEqual(own[1]!.message.content, native.content);
+  for (const foreign of [
+    { ...model, id: "other-model" },
+    { ...model, provider: "other-provider" },
+    { ...model, api: "other-api" },
+  ]) {
+    const frames = prepareFrames(prepareReplayMessages(messages, foreign));
+    assert.deepEqual(frames[1]!.message.content, [{ type: "text", text: "visible" }]);
+  }
+  const noCarrier = structuredClone(messages);
+  delete (noCarrier[1] as AssistantMessage).diagnostics;
+  assert.deepEqual(
+    prepareFrames(prepareReplayMessages(noCarrier, { ...model, provider: "other-provider" }))[1]!.message.content,
+    [{ type: "text", text: "visible" }],
+  );
+  assert.deepEqual(messages, original);
 });
 
 test("normalizes tool schemas and builds native generation fields", () => {

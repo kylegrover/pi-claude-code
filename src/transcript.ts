@@ -6,13 +6,14 @@ import {
   type AssistantMessage,
   type ImageContent,
   type Message,
+  type Model,
   type SimpleStreamOptions,
   type SystemMessage,
   type TextContent,
   type Tool,
   type ToolResultMessage,
 } from "@earendil-works/pi-ai";
-import { supportsAdaptiveThinking } from "./model-catalog.ts";
+import { requiresAdaptiveThinking, supportsAdaptiveThinking } from "./model-catalog.ts";
 import type { NativeContentBlock, NativeFrame, NativeMessage } from "./native-types.ts";
 
 export const TOOL_PREFIX = "mcp__pi__";
@@ -176,6 +177,35 @@ function assistantContent(message: AssistantMessage): NativeContentBlock[] {
     });
   }
   return canonicalAssistantContent(message);
+}
+
+/** Normalize cross-provider history without changing Pi's saved messages. */
+export function prepareReplayMessages(messages: Message[], model: Model<any>): Message[] {
+  const toolCallIds = new Map<string, string>();
+  return messages.map((message) => {
+    if (message.role === "toolResult") {
+      const id = toolCallIds.get(message.toolCallId);
+      return id ? { ...message, toolCallId: id } : message;
+    }
+    if (message.role !== "assistant") return message;
+    const sameModel = message.provider === model.provider && message.api === model.api && message.model === model.id;
+    if (sameModel) return message;
+
+    return {
+      ...message,
+      // A foreign carrier can restore signed thinking even after the visible
+      // thinking blocks are removed, because its projection omits thinking.
+      diagnostics: message.diagnostics?.filter((item) => item.type !== NATIVE_REPLAY_DIAGNOSTIC),
+      content: message.content.flatMap((block): AssistantMessage["content"] => {
+        if (block.type === "thinking") return [];
+        if (block.type !== "toolCall") return [block];
+        // Match Pi's Anthropic adapter: IDs must be ASCII and at most 64 chars.
+        const id = block.id.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64);
+        toolCallIds.set(block.id, id);
+        return [{ ...block, id }];
+      }),
+    };
+  });
 }
 
 export function prepareFrames(messages: Message[]): NativeFrame[] {
@@ -369,10 +399,13 @@ export function buildExtraBody(
   const body: Record<string, unknown> = { tools: nativeTools };
   if (options?.maxTokens !== undefined) body.max_tokens = options.maxTokens;
 
-  if (options?.reasoning) {
-    if (supportsAdaptiveThinking(modelId)) body.thinking = { type: "adaptive" };
+  // Pi's branch/compaction summarizers omit reasoning. Do not send an unsupported
+  // disabled-thinking request to models whose catalog explicitly forbids "off".
+  const reasoning = options?.reasoning ?? (requiresAdaptiveThinking(modelId) ? "low" : undefined);
+  if (reasoning) {
+    if (supportsAdaptiveThinking(modelId) || requiresAdaptiveThinking(modelId)) body.thinking = { type: "adaptive" };
     body.output_config = {
-      effort: options.reasoning === "minimal" ? "low" : options.reasoning,
+      effort: reasoning === "minimal" ? "low" : reasoning,
     };
   } else {
     body.thinking = { type: "disabled" };
