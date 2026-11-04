@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { executableNodeScript } from "./helpers.ts";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -7,6 +8,7 @@ import {
   cachedClaudeProcessCount,
   closeClaudeProcesses,
   discoverClaudeModels,
+  getClaudeStatus,
   rewriteInitialRequest,
   runClaudeRequest,
 } from "../src/claude-cli.ts";
@@ -140,12 +142,27 @@ test("injects native system history at assistant boundaries", () => {
   );
 });
 
+test("auth status launches a fake Claude command from a path with spaces", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi claude command "));
+  try {
+    const script = join(root, "fake claude.mjs");
+    await writeFile(script, `console.log(JSON.stringify({loggedIn: true, authMethod: "claude.ai", subscriptionType: "test"}));\n`);
+    const command = await executableNodeScript(script);
+    const status = await getClaudeStatus({ ...process.env, PI_CLAUDE_CODE_COMMAND: command });
+    assert.equal(status.available, true);
+    assert.equal(status.loggedIn, true);
+    assert.equal(status.subscription, true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("runs a request through a stream-json Claude executable", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-claude-code-test-"));
   const workingRoot = await realpath(root);
-  const executable = join(root, "fake-claude.mjs");
+  const script = join(root, "fake-claude.mjs");
   await writeFile(
-    executable,
+    script,
     `#!/usr/bin/env node
 import readline from "node:readline";
 import {appendFileSync, readFileSync} from "node:fs";
@@ -211,7 +228,7 @@ for await (const line of input) {
 `,
     "utf8",
   );
-  await chmod(executable, 0o755);
+  const executable = await executableNodeScript(script);
 
   const events: string[] = [];
   try {

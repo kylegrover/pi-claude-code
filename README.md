@@ -37,9 +37,26 @@ execution. Claude Code only talks to the model. It never runs tools itself.
 
 ## Installation
 
+This is Kyle's shared reliability fork of `earendil-works/pi-claude-code`.
+The `reliability` branch is the development/integration branch. Device runtimes
+should install an explicitly reviewed commit, not maintain per-device patches:
+
 ```sh
-pi install https://github.com/earendil-works/pi-claude-code
+pi install git:github.com/kylegrover/pi-claude-code@<reviewed-full-commit>
 ```
+
+The current reviewed pin and migration/rollback instructions live in the
+`my-pi-setup-ideas` repository, `docs/CLAUDE_CODE_SHARED_FORK.md`.
+Keep exactly one enabled copy of this provider. Preserve dirty legacy checkouts
+before removing their declarations; never apply the old cumulative patch on top
+of this branch.
+
+For development, use `npm ci`, `npm test`, and `npm run check`. Development Pi
+packages are pinned to 1.5.0; runtime peer dependencies come from the host Pi.
+Tests use fake Claude processes and local HTTP fixtures, not paid model requests.
+Windows fixtures use `.cmd` wrappers and cover command paths containing spaces.
+Mac/Linux continue to use executable shebang scripts. Run validation on each OS
+before treating it as platform acceptance.
 
 Then pick a model from the **Claude Code Subscription (Experimental)** provider
 in Pi.

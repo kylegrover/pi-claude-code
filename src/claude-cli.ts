@@ -328,7 +328,9 @@ function spawnCommand(
   if (process.platform === "win32" && /\.(?:cmd|bat)$/iu.test(command)) {
     const comspec = options?.env?.COMSPEC || process.env.COMSPEC || "cmd.exe";
     const quote = (value: string) => `"${value.replace(/"/gu, '""')}"`;
-    return spawn(comspec, ["/d", "/s", "/c", [quote(command), ...args.map(quote)].join(" ")], options);
+    // /s strips the outer quote pair; Node must not re-escape cmd.exe's syntax.
+    const commandLine = `"${[quote(command), ...args.map(quote)].join(" ")}"`;
+    return spawn(comspec, ["/d", "/s", "/c", commandLine], { ...options, windowsVerbatimArguments: true });
   }
   return spawn(command, args, options);
 }

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { executableNodeScript } from "./helpers.ts";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -53,9 +54,9 @@ test("usage credits are opt-in", () => {
 
 test("stops when Claude Code reports a request was charged to usage credits", async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), "pi-claude-code-billing-")));
-  const executable = join(root, "fake-claude.mjs");
+  const script = join(root, "fake-claude.mjs");
   await writeFile(
-    executable,
+    script,
     `#!/usr/bin/env node
 import readline from "node:readline";
 if (process.argv.includes("auth") && process.argv.includes("status")) {
@@ -86,7 +87,7 @@ for await (const line of input) {
 `,
     "utf8",
   );
-  await chmod(executable, 0o755);
+  const executable = await executableNodeScript(script);
 
   const request = (env: Record<string, string>) =>
     runClaudeRequest({
