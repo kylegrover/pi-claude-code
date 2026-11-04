@@ -8,7 +8,9 @@ import { createInterface } from "node:readline";
 import { spawn, type ChildProcess } from "node:child_process";
 import { registerSessionResourceCleanup } from "@earendil-works/pi-ai";
 import { TurnRelay } from "./turn-relay.ts";
+import { fingerprintRequest, type RequestFingerprint } from "./request-fingerprint.ts";
 import { usageCreditsAllowed, usageCreditsChargeError, type RateLimitInfo } from "./billing.ts";
+import { classifyUsageLimit, rememberRateLimit, UsageLimitError } from "./usage-limit.ts";
 import { envFlagEnabled } from "./env.ts";
 import type { DiscoveredClaudeModel } from "./model-catalog.ts";
 import type {
@@ -76,6 +78,8 @@ export interface RunClaudeOutput {
     upstreamRequests: number;
     blockedRequests: number;
     requestId?: string;
+    /** Content-free hashes of the body sent upstream, for cache-miss diagnosis. */
+    fingerprint?: RequestFingerprint;
   };
   initialSystemMessages?: unknown[];
   /** Latest plan-limit status Claude Code reported for this turn. */
@@ -1174,7 +1178,10 @@ class ClaudeProcess {
           result = event;
           break;
         } else if (event.type === "rate_limit_event") {
-          if (event.rate_limit_info && typeof event.rate_limit_info === "object") rateLimit = event.rate_limit_info;
+          if (event.rate_limit_info && typeof event.rate_limit_info === "object") {
+            rateLimit = event.rate_limit_info;
+            rememberRateLimit(rateLimit);
+          }
         } else if (event.type === "stream_event" && !this.relay.used) {
           deliver(event.event);
         }
@@ -1185,6 +1192,9 @@ class ClaudeProcess {
       let message: NativeMessage | undefined;
       if (this.relay.used) {
         if (this.relay.status !== 200 || !this.relay.capture.complete || !this.relay.capture.message) {
+          const limit = classifyUsageLimit({ status: this.relay.status, errorText: this.relay.errorText(),
+            headers: this.relay.rateLimitHeaders, rateLimit });
+          if (limit) throw new UsageLimitError(limit);
           let detail = `status ${this.relay.status ?? "unknown"}, capture ${this.relay.capture.complete ? "complete" : "incomplete"}`;
           if (this.relay.failure) detail += `, relay failure ${this.relay.failure}`;
           if (this.relay.denied) detail += `, native retries denied ${this.relay.denied}`;
@@ -1248,6 +1258,7 @@ class ClaudeProcess {
           upstreamRequests: Number(this.relay.used),
           blockedRequests: this.relay.denied,
           requestId: this.relay.requestId,
+          fingerprint: fingerprintRequest(this.relay.requestBody),
         },
         initialSystemMessages:
           input.initialSystemMessages ?? deriveInitialSystemMessages(this.relay.originalRequestBody),

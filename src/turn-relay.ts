@@ -137,6 +137,8 @@ export class TurnRelay {
   /** The upstream request failed before Anthropic sent a response status. */
   upstreamFailed = false;
   errorBody = Buffer.alloc(0);
+  /** Upstream rate-limit headers only (no auth/cookies), for usage-limit reporting. */
+  rateLimitHeaders: Record<string, string> = {};
   originalRequestBody?: Buffer;
   requestBody?: Buffer;
 
@@ -194,6 +196,7 @@ export class TurnRelay {
     this.failure = undefined;
     this.upstreamFailed = false;
     this.errorBody = Buffer.alloc(0);
+    this.rateLimitHeaders = {};
     this.originalRequestBody = undefined;
     this.requestBody = undefined;
     this.transformRequest = transformRequest;
@@ -321,6 +324,11 @@ export class TurnRelay {
       });
       this.sockets.add(upstreamResponse);
       this.status = upstreamResponse.statusCode;
+      for (const [name, value] of Object.entries(upstreamResponse.headers)) {
+        if (/^anthropic-ratelimit-unified-|^retry-after$/u.test(name) && value !== undefined) {
+          this.rateLimitHeaders[name] = Array.isArray(value) ? value.join(",") : String(value);
+        }
+      }
       this.requestId =
         String(upstreamResponse.headers["request-id"] ?? upstreamResponse.headers["x-request-id"] ?? "") || undefined;
 
@@ -342,7 +350,10 @@ export class TurnRelay {
       if (this.status === 200) this.capture.finish();
       response.end();
     } catch (error) {
-      this.failure = describeFailure(error);
+      // Bounded and redacted: never include auth tokens, request bodies or a stack trace.
+      this.failure = describeFailure(error)
+        .replace(/Bearer\s+\S+|sk-ant-[A-Za-z0-9_-]+/giu, "[redacted]")
+        .replace(/\s+/gu, " ").slice(0, 500);
       this.upstreamFailed = upstreamRequest !== undefined && this.status === undefined && !this.cancelled;
       if (!response.headersSent) response.writeHead(this.cancelled ? 499 : 502).end();
       else response.destroy();
