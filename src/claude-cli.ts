@@ -586,7 +586,6 @@ function processEnvironment(
   }
   delete env.CLAUDE_CODE_EXTRA_BODY;
   Object.assign(env, {
-    CLAUDE_CODE_ENTRYPOINT: "pi-agent",
     ENABLE_TOOL_SEARCH: "false",
     DISABLE_AUTOUPDATER: "1",
     DISABLE_FEEDBACK_COMMAND: "1",
