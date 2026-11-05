@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { closeClaudeProcesses } from "../src/claude-cli.ts";
 import { CLAUDE_CODE_MODELS } from "../src/model-catalog.ts";
 import { streamClaudeCode } from "../src/stream.ts";
+import { executableNodeScript } from "./helpers.ts";
 
 test("hands Pi a tool call for a tool it never declared", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-claude-code-stream-"));
@@ -43,7 +44,7 @@ for await (const line of input) {
 `,
     "utf8",
   );
-  await chmod(executable, 0o755);
+  const command = await executableNodeScript(executable);
 
   try {
     const model = CLAUDE_CODE_MODELS.find((candidate) => candidate.id === "claude-opus-5-5")!;
@@ -54,7 +55,7 @@ for await (const line of input) {
         messages: [{ role: "user", content: [{ type: "text", text: "count errors" }], timestamp: 0 }],
         tools: [{ name: "mcp__datadog__aggregate_rum_events", description: "Aggregate RUM", parameters: { type: "object" } }],
       } as never,
-      { env: { PI_CLAUDE_CODE_COMMAND: executable }, timeoutMs: 5_000, cacheRetention: "none" } as never,
+      { env: { PI_CLAUDE_CODE_COMMAND: command }, timeoutMs: 5_000, cacheRetention: "none" } as never,
     );
     const message = await stream.result();
     assert.equal(message.stopReason, "toolUse", message.errorMessage);
