@@ -665,6 +665,16 @@ function requestMessages(body: Buffer | undefined): NativeRequestMessage[] | und
   }
 }
 
+/**
+ * The session's stable system-reminder layout: the one recorded from its first
+ * Claude request, or derived from this request when it is the first. Applying it
+ * to the first request too keeps the second from moving reminders and re-writing
+ * the whole history into the prompt cache (seen on every first switch to Claude).
+ */
+export function stableSystemMessages(body: Buffer, recorded: unknown[] | undefined): unknown[] | undefined {
+  return recorded ?? deriveInitialSystemMessages(body);
+}
+
 function deriveInitialSystemMessages(body: Buffer | undefined): unknown[] | undefined {
   const messages = requestMessages(body);
   if (messages?.[0]?.role !== "user") return undefined;
@@ -1129,7 +1139,13 @@ class ClaudeProcess {
     };
     this.relay.beginTurn(
       deliver,
-      (body) => rewriteInitialRequest(body, input.frames, input.initialSystemMessages, input.nativeSystemInjections),
+      (body) =>
+        rewriteInitialRequest(
+          body,
+          input.frames,
+          stableSystemMessages(body, input.initialSystemMessages),
+          input.nativeSystemInjections,
+        ),
       input.betas,
     );
 

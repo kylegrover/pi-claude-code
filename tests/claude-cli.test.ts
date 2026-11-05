@@ -11,6 +11,7 @@ import {
   discoverClaudeModels,
   getClaudeStatus,
   rewriteInitialRequest,
+  stableSystemMessages,
   runClaudeRequest,
 } from "../src/claude-cli.ts";
 import type { NativeFrame } from "../src/native-types.ts";
@@ -95,6 +96,38 @@ test("stabilizes Claude Code's native replay reminders and cache breakpoint", ()
   );
   assert.deepEqual((rewritten[5]?.content as Block[]).at(-1)?.cache_control, { type: "ephemeral", ttl: "1h" });
   assert.deepEqual((rewritten.at(-1)?.content as Block[]).at(-1)?.cache_control, { type: "ephemeral", ttl: "1h" });
+});
+
+test("the first Claude request already uses the reminder layout later requests replay", () => {
+  // Claude Code's own shape: environment after the first user message, the date at the tail.
+  const environment = { role: "system", content: [text("environment reminder")] };
+  const date = { role: "system", content: [text("date reminder")] };
+  const history = [
+    { role: "user", content: [text("earlier history")] },
+    environment,
+    { role: "assistant", content: [text("old reply")] },
+    { role: "user", content: [text("first Claude question")] },
+  ];
+  const send = (wire: WireMessage[], recorded: unknown[] | undefined) => {
+    const body = Buffer.from(JSON.stringify({ messages: wire }));
+    const layout = stableSystemMessages(body, recorded);
+    return { layout, sent: rewrite(wire, framesFor(wire), layout) };
+  };
+
+  const first = send([...history, date], undefined);
+  const followUp = [
+    ...history,
+    { role: "assistant", content: [text("first answer")] },
+    { role: "user", content: [text("second question")] },
+    date,
+  ];
+  const second = send(followUp, first.layout);
+  // Everything the first request sent (but its moving tail breakpoint) is a prefix of the second.
+  assert.deepEqual(withoutMarkers(second.sent.slice(0, first.sent.length)), withoutMarkers(first.sent));
+
+  // Without a layout on the first request (the old behavior), the date reminder moved.
+  const unstable = rewrite([...history, date], framesFor(history), undefined);
+  assert.notDeepEqual(withoutMarkers(second.sent.slice(0, unstable.length)), withoutMarkers(unstable));
 });
 
 test("strips reminders when the first user message carries none (issue #27)", () => {
