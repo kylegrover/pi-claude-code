@@ -740,7 +740,7 @@ for await (const line of input) {
 `,
     "utf8",
   );
-  await chmod(executable, 0o755);
+  const command = await executableNodeScript(executable);
 
   try {
     const error = await runClaudeRequest({
@@ -750,7 +750,7 @@ for await (const line of input) {
       systemPrompt: "system",
       manifest: [],
       extraBody: { tools: [] },
-      env: { PI_CLAUDE_CODE_COMMAND: executable },
+      env: { PI_CLAUDE_CODE_COMMAND: command },
       upstreamUrl: `http://127.0.0.1:${port}`,
       timeoutMs: 5_000,
     }).then(
