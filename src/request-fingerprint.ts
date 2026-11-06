@@ -18,6 +18,10 @@ export interface RequestFingerprint {
   messages: string[];
   /** Positions carrying cache_control, e.g. "system.2", "messages.41.3". */
   breakpoints: string[];
+  /** TTL of each breakpoint, parallel to `breakpoints` ("1h", "5m" or "default"). */
+  ttls?: string[];
+  /** Hash of `metadata` (Claude Code's per-process user/session id); never the value. */
+  metadata?: string;
   /** Hash of the remaining top-level settings (thinking, max_tokens, ...), excluding metadata/stream. */
   other: string;
   bytes: number;
@@ -35,6 +39,10 @@ function stripCacheControl(value: unknown): unknown {
 
 const blocks = (value: unknown): unknown[] => (Array.isArray(value) ? value : value === undefined ? [] : [value]);
 const marked = (value: unknown) => !!value && typeof value === "object" && "cache_control" in value;
+const ttlOf = (value: unknown): string => {
+  const control = (value as { cache_control?: { ttl?: unknown } }).cache_control;
+  return typeof control?.ttl === "string" ? control.ttl : "default";
+};
 
 export function fingerprintRequest(body: Buffer | string | undefined): RequestFingerprint | undefined {
   if (!body) return undefined;
@@ -46,14 +54,20 @@ export function fingerprintRequest(body: Buffer | string | undefined): RequestFi
   }
   if (!request || typeof request !== "object" || !Array.isArray(request.messages)) return undefined;
   const breakpoints: string[] = [];
+  const ttls: string[] = [];
+  const mark = (value: unknown, position: string) => {
+    if (!marked(value)) return;
+    breakpoints.push(position);
+    ttls.push(ttlOf(value));
+  };
   const system = blocks(request.system);
-  system.forEach((block, i) => marked(block) && breakpoints.push(`system.${i}`));
+  system.forEach((block, i) => mark(block, `system.${i}`));
   const tools = Array.isArray(request.tools) ? request.tools : [];
-  tools.forEach((tool, i) => marked(tool) && breakpoints.push(`tools.${i}`));
+  tools.forEach((tool, i) => mark(tool, `tools.${i}`));
   const messages = request.messages as Array<{ content?: unknown }>;
   messages.forEach((message, i) => {
-    if (marked(message)) breakpoints.push(`messages.${i}`);
-    blocks(message?.content).forEach((block, j) => marked(block) && breakpoints.push(`messages.${i}.${j}`));
+    mark(message, `messages.${i}`);
+    blocks(message?.content).forEach((block, j) => mark(block, `messages.${i}.${j}`));
   });
   const { messages: _m, system: _s, tools: _t, metadata: _md, stream: _st, ...other } = request;
   return {
@@ -64,6 +78,8 @@ export function fingerprintRequest(body: Buffer | string | undefined): RequestFi
     toolCount: tools.length,
     messages: messages.map((message) => hash(stripCacheControl(message))),
     breakpoints,
+    ttls,
+    ...(request.metadata === undefined ? {} : { metadata: hash(request.metadata) }),
     other: hash(other),
     bytes: Buffer.byteLength(body),
   };

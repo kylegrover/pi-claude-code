@@ -141,6 +141,8 @@ export class TurnRelay {
   rateLimitHeaders: Record<string, string> = {};
   originalRequestBody?: Buffer;
   requestBody?: Buffer;
+  /** The anthropic-beta header sent upstream (feature names only), for cache-miss diagnosis. */
+  sentBetas?: string;
 
   private readonly upstream: URL;
   private readonly prefix = `/turn/${randomBytes(32).toString("base64url")}`;
@@ -199,6 +201,7 @@ export class TurnRelay {
     this.rateLimitHeaders = {};
     this.originalRequestBody = undefined;
     this.requestBody = undefined;
+    this.sentBetas = undefined;
     this.transformRequest = transformRequest;
     this.requestBetas = requestBetas;
     this.cancelled = false;
@@ -303,6 +306,9 @@ export class TurnRelay {
           ]),
         ].join(",");
       }
+
+      const betaHeader = headers["anthropic-beta"];
+      this.sentBetas = betaHeader === undefined ? undefined : String(betaHeader);
 
       const pathPrefix = this.upstream.pathname.replace(/\/$/u, "");
       const transport = this.upstream.protocol === "https:" ? https : http;

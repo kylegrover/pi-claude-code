@@ -80,6 +80,13 @@ export interface RunClaudeOutput {
     requestId?: string;
     /** Content-free hashes of the body sent upstream, for cache-miss diagnosis. */
     fingerprint?: RequestFingerprint;
+    /** anthropic-beta header sent upstream (feature names only). */
+    betas?: string;
+    /**
+     * The Claude Code process that ran this turn: reused warm (continuation) or newly
+     * started with the history replayed, its age, and its turn count.
+     */
+    process?: { reused: boolean; ageMs: number; turn: number };
   };
   initialSystemMessages?: unknown[];
   /** Latest plan-limit status Claude Code reported for this turn. */
@@ -959,6 +966,7 @@ class ClaudeProcess {
   busy = false;
   readonly createdAt = Date.now();
   lastUsed = this.createdAt;
+  private turns = 0;
 
   private tipHash?: string;
   private expiryTimer?: NodeJS.Timeout;
@@ -1129,6 +1137,7 @@ class ClaudeProcess {
   async run(input: RunClaudeInput, continuation: boolean): Promise<RunClaudeOutput> {
     if (!this.isAlive()) throw new Error("Claude Code process is no longer available");
     input.signal?.throwIfAborted();
+    const processInfo = { reused: continuation, ageMs: Date.now() - this.createdAt, turn: ++this.turns };
 
     let sawMessageStop = false;
     this.delivered = false;
@@ -1274,6 +1283,8 @@ class ClaudeProcess {
           blockedRequests: this.relay.denied,
           requestId: this.relay.requestId,
           fingerprint: fingerprintRequest(this.relay.requestBody),
+          betas: this.relay.sentBetas,
+          process: processInfo,
         },
         initialSystemMessages:
           input.initialSystemMessages ?? deriveInitialSystemMessages(this.relay.originalRequestBody),

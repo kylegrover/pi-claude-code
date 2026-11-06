@@ -23,6 +23,17 @@ test("fingerprint holds hashes and positions only, never content or metadata", (
   assert.equal(fp.toolCount, 1);
   assert.deepEqual(fp.breakpoints, ["system.1", "messages.2.0"]);
   assert.ok(fp.messages.every((h) => /^[0-9a-f]{12}$/.test(h)));
+  assert.match(fp.metadata!, /^[0-9a-f]{12}$/);
+});
+
+test("fingerprint records each breakpoint's TTL and a hash of metadata", () => {
+  const msgs = JSON.parse(body().toString()).messages;
+  msgs[2].content[0].cache_control = { type: "ephemeral", ttl: "1h" };
+  const a = fingerprintRequest(body({ messages: msgs }))!;
+  assert.deepEqual(a.ttls, ["default", "1h"]);
+  const b = fingerprintRequest(body({ messages: msgs, metadata: { user_id: "other" } }))!;
+  assert.notEqual(b.metadata, a.metadata);
+  assert.equal(fingerprintRequest(body({ metadata: undefined }))!.metadata, undefined);
 });
 
 test("moving cache_control or changing metadata does not change hashes", () => {

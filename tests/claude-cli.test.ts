@@ -608,6 +608,10 @@ for await (const line of input) {
     assert.equal(second.message.id, "m_fake_2");
     assert.equal((await readFile(processLog, "utf8")).trim().split("\n").length, 1);
     assert.equal(cachedClaudeProcessCount(), 1);
+    // The relay diagnostic says whether the turn reused the warm process.
+    assert.deepEqual([first.relay.process?.reused, first.relay.process?.turn], [false, 1]);
+    assert.deepEqual([second.relay.process?.reused, second.relay.process?.turn], [true, 2]);
+    assert.ok(second.relay.process!.ageMs >= first.relay.process!.ageMs);
 
     // A branch mismatch replaces the warm process instead of risking stale
     // hidden Claude state.
@@ -618,6 +622,7 @@ for await (const line of input) {
     });
     assert.equal(branched.message.id, "m_fake");
     assert.equal((await readFile(processLog, "utf8")).trim().split("\n").length, 2);
+    assert.deepEqual([branched.relay.process?.reused, branched.relay.process?.turn], [false, 1]);
 
     // Retained workers are deliberately bounded. Creating two more sessions
     // evicts the least-recently-used idle worker and leaves only two alive.
