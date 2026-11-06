@@ -69,6 +69,69 @@ test("prepares replay frames and groups tool results", () => {
   assert.equal(frames[2]?.shouldQuery, undefined);
 });
 
+test("synthesizes results for tool calls orphaned by session branching", () => {
+  const assistant: AssistantMessage = {
+    role: "assistant",
+    api: "test",
+    provider: "claude-code",
+    model: "sonnet",
+    content: [
+      { type: "text", text: "checking" },
+      { type: "toolCall", id: "t1", name: "bash", arguments: { command: "a" } },
+      { type: "toolCall", id: "t2", name: "bash", arguments: { command: "b" } },
+    ],
+    usage,
+    stopReason: "toolUse",
+    timestamp: 1,
+  };
+  const answered = {
+    role: "toolResult" as const,
+    toolCallId: "t2",
+    toolName: "bash",
+    content: [{ type: "text" as const, text: "B" }],
+    isError: false,
+    timestamp: 2,
+  };
+
+  // A /tree branch summary parented on the tool-calling entry: tool_use then user text.
+  const frames = prepareFrames([
+    { role: "user", content: "inspect", timestamp: 0 },
+    assistant,
+    { role: "user", content: "branch summary", timestamp: 3 },
+  ]);
+  assert.deepEqual(frames[2]?.message.content, [
+    { type: "tool_result", tool_use_id: "t1", content: "No result provided", is_error: true },
+    { type: "tool_result", tool_use_id: "t2", content: "No result provided", is_error: true },
+    { type: "text", text: "branch summary" },
+  ]);
+
+  // Partially answered: only the missing call is synthesized, before user text.
+  const partial = prepareFrames([
+    { role: "user", content: "inspect", timestamp: 0 },
+    assistant,
+    answered,
+    { role: "user", content: "next", timestamp: 3 },
+  ]);
+  assert.deepEqual(
+    partial[2]?.message.content.map((block) => (block as { tool_use_id?: string }).tool_use_id ?? "text"),
+    ["t2", "t1", "text"],
+  );
+
+  // Two assistant frames back to back get a synthetic user frame between them.
+  const adjacent = prepareFrames([
+    { role: "user", content: "inspect", timestamp: 0 },
+    assistant,
+    { ...assistant, content: [{ type: "text", text: "later" }], stopReason: "stop" },
+    { role: "user", content: "go", timestamp: 3 },
+  ]);
+  assert.deepEqual(
+    adjacent.map((frame) => frame.type),
+    ["user", "assistant", "user", "assistant", "user"],
+  );
+  assert.equal(adjacent[2]?.message.content.length, 2);
+  assert.equal(adjacent[2]?.shouldQuery, false);
+});
+
 test("replays native signed blocks only while the visible projection is unchanged", () => {
   const assistant: AssistantMessage = {
     role: "assistant",

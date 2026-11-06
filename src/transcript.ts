@@ -204,6 +204,47 @@ function assistantContent(message: AssistantMessage): NativeContentBlock[] {
   return canonicalAssistantContent(message);
 }
 
+function blockField(block: unknown, key: string): unknown {
+  return block && typeof block === "object" ? (block as Record<string, unknown>)[key] : undefined;
+}
+
+/**
+ * Anthropic requires every assistant `tool_use` to be answered by a `tool_result`
+ * at the start of the very next user message. Session branching (for example a
+ * `/tree` branch summary attached to a tool-calling assistant entry) can leave a
+ * call unanswered, which would 400 every later request. Mirror pi-ai's
+ * transformMessages and synthesize an error result for each orphaned call.
+ */
+function closeOrphanedToolUses(frames: NativeFrame[]): void {
+  for (let index = 0; index < frames.length; index++) {
+    const frame = frames[index]!;
+    if (frame.type !== "assistant") continue;
+    const ids = frame.message.content
+      .filter((block) => blockField(block, "type") === "tool_use")
+      .map((block) => String(blockField(block, "id")));
+    if (ids.length === 0) continue;
+
+    let next = frames[index + 1];
+    if (next?.type !== "user") {
+      next = { type: "user", message: { role: "user", content: [] } };
+      frames.splice(index + 1, 0, next);
+    }
+    const answered = new Set(
+      next.message.content
+        .filter((block) => blockField(block, "type") === "tool_result")
+        .map((block) => String(blockField(block, "tool_use_id"))),
+    );
+    const missing = ids
+      .filter((id) => !answered.has(id))
+      .map((id) => ({ type: "tool_result", tool_use_id: id, content: "No result provided", is_error: true }));
+    if (missing.length === 0) continue;
+    // tool_result blocks must precede any other content in the user message.
+    const content = next.message.content;
+    const firstOther = content.findIndex((block) => blockField(block, "type") !== "tool_result");
+    content.splice(firstOther === -1 ? content.length : firstOther, 0, ...missing);
+  }
+}
+
 export function prepareFrames(messages: Message[]): NativeFrame[] {
   const frames: NativeFrame[] = [];
 
@@ -239,6 +280,8 @@ export function prepareFrames(messages: Message[]): NativeFrame[] {
       frames.push({ type: role, message: { role, content: blocks } });
     }
   }
+
+  closeOrphanedToolUses(frames);
 
   const final = frames.at(-1);
   if (!final || final.type !== "user" || final.message.content.length === 0) {
