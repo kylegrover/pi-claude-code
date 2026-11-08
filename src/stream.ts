@@ -383,7 +383,7 @@ export function streamClaudeCode(
         env: options?.env,
         initialSystemMessages,
         nativeSystemInjections: nativeTranscript?.systemInjections,
-        betas: nativeTranscript ? [NATIVE_TOOL_CHANGES_BETA] : undefined,
+        betas: nativeTranscript ? [NATIVE_TOOL_CHANGES_BETA, ...nativeTranscript.betas] : undefined,
         sessionId: options?.cacheRetention === "none" ? undefined : options?.sessionId,
         onEvent: (event) => translator.event(event),
       });

@@ -1,7 +1,6 @@
 import {
-  getDeclaredTools,
+  declarationsEqual,
   getInitialSystemMessage,
-  hasToolRedefinitions,
   renderSystemMessageUpdate,
   type AssistantMessage,
   type ImageContent,
@@ -19,6 +18,8 @@ import type { NativeContentBlock, NativeFrame, NativeMessage } from "./native-ty
 export const TOOL_PREFIX = "mcp__pi__";
 export const NATIVE_REPLAY_DIAGNOSTIC = "claude-code.native-assistant.v1";
 export const NATIVE_TOOL_CHANGES_BETA = "mid-conversation-tool-changes-2026-07-01";
+/** Lets a `tool_addition` carry a full `tool_definition` (pi-ai's Anthropic provider sends it too). */
+export const INLINE_TOOLS_BETA = "inline-tools-2026-09-15";
 
 const DEFERRED_TOOL_PLACEHOLDER = {
   name: "__pi_deferred_placeholder__",
@@ -36,6 +37,8 @@ export interface NativeSystemInjection {
 export interface NativeTranscriptPlan {
   requestTools: Array<Record<string, unknown>>;
   systemInjections: NativeSystemInjection[];
+  /** Betas the plan needs beyond NATIVE_TOOL_CHANGES_BETA. */
+  betas: string[];
 }
 
 interface ReplayCarrier {
@@ -361,23 +364,47 @@ export function prepareTools(tools: Tool[]): {
   return { manifest, nativeTools, names };
 }
 
-function nativeSystemBlocks(message: SystemMessage): Array<Record<string, unknown>> {
+/**
+ * A same-name tool whose description or schema changed after it was first declared (e.g. an
+ * extension updated by /reload) can't be referenced by name: the request-level list holds its
+ * first definition. It is added by value instead (`tool_definition`, INLINE_TOOLS_BETA), the way
+ * pi-ai's Anthropic provider does, so the cached prefix survives. Collapsing the system messages
+ * instead rewrites the system prompt and tool list and misses the whole cache.
+ */
+function nativeSystemBlocks(
+  message: SystemMessage,
+  firstDeclared: Map<string, Tool>,
+  inline: (tool: Tool) => Record<string, unknown>,
+): { blocks: Array<Record<string, unknown>>; usedInline: boolean } {
   const blocks: Array<Record<string, unknown>> = [];
+  let usedInline = false;
   const text = renderSystemMessageUpdate(message);
   if (text) blocks.push({ type: "text", text: sanitizeSurrogates(text) });
+  const redefined = new Set(
+    (message.toolsAdded ?? [])
+      .filter((tool) => firstDeclared.has(tool.name) && !declarationsEqual(firstDeclared.get(tool.name)!, tool))
+      .map((tool) => tool.name),
+  );
   for (const tool of message.toolsRemoved ?? []) {
+    // A new definition under the same name replaces the old one, so no removal is needed.
+    if (redefined.has(tool.name)) continue;
     blocks.push({
       type: "tool_removal",
       tool: { type: "tool_reference", name: `${TOOL_PREFIX}${tool.name}` },
     });
   }
   for (const tool of message.toolsAdded ?? []) {
-    blocks.push({
-      type: "tool_addition",
-      tool: { type: "tool_reference", name: `${TOOL_PREFIX}${tool.name}` },
-    });
+    if (redefined.has(tool.name)) {
+      usedInline = true;
+      blocks.push({ type: "tool_addition", tool: { type: "tool_definition", definition: inline(tool) } });
+    } else {
+      blocks.push({
+        type: "tool_addition",
+        tool: { type: "tool_reference", name: `${TOOL_PREFIX}${tool.name}` },
+      });
+    }
   }
-  return blocks;
+  return { blocks, usedInline };
 }
 
 /**
@@ -390,10 +417,18 @@ export function prepareNativeTranscript(
 ): NativeTranscriptPlan | undefined {
   const initial = getInitialSystemMessage(messages);
   const initialTools = initial?.toolsAdded ?? [];
-  if (!supported || initialTools.length === 0 || hasToolRedefinitions(messages)) return undefined;
+  if (!supported || initialTools.length === 0) return undefined;
 
-  const declared = getDeclaredTools(messages);
+  // The request-level list carries each tool's FIRST definition, so earlier references keep
+  // meaning what they meant when they were sent; later redefinitions travel inline.
+  const firstDeclared = new Map<string, Tool>();
+  for (const message of messages) {
+    if (message.role !== "system") continue;
+    for (const tool of message.toolsAdded ?? []) if (!firstDeclared.has(tool.name)) firstDeclared.set(tool.name, tool);
+  }
+  const declared = [...firstDeclared.values()];
   const prepared = prepareTools(declared);
+  const inline = (tool: Tool) => prepareTools([tool]).nativeTools[0]!;
   const nativeByName = new Map(
     prepared.nativeTools.map((tool) => [String(tool.name).slice(TOOL_PREFIX.length), tool]),
   );
@@ -412,11 +447,13 @@ export function prepareNativeTranscript(
     pending = [];
   };
 
+  let usedInline = false;
   for (let index = 1; index < messages.length; index++) {
     const message = messages[index]!;
     if (message.role === "system") {
-      const blocks = nativeSystemBlocks(message);
-      if (blocks.length) pending.push(blocks);
+      const result = nativeSystemBlocks(message, firstDeclared, inline);
+      usedInline ||= result.usedInline;
+      if (result.blocks.length) pending.push(result.blocks);
     } else if (message.role === "assistant" && assistantContent(message).length > 0) {
       flush(assistantOrdinal);
       assistantOrdinal += 1;
@@ -427,6 +464,7 @@ export function prepareNativeTranscript(
   return {
     requestTools: [...initialNative, structuredClone(DEFERRED_TOOL_PLACEHOLDER), ...laterNative],
     systemInjections,
+    betas: usedInline ? [INLINE_TOOLS_BETA] : [],
   };
 }
 

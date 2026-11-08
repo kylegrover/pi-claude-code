@@ -11,6 +11,7 @@ import {
   prepareNativeTranscript,
   prepareTools,
   TOOL_PREFIX,
+  INLINE_TOOLS_BETA,
 } from "../src/transcript.ts";
 
 const usage = {
@@ -238,16 +239,32 @@ test("builds cache-stable native tool declarations and chronological system chan
     ),
     undefined,
   );
-  assert.equal(
-    prepareNativeTranscript(
-      [
-        ...messages,
-        { role: "system", content: "", toolsAdded: [{ ...alpha, description: "changed" }], timestamp: 6 },
-      ],
-      true,
-    ),
-    undefined,
-  );
+  assert.deepEqual(plan.betas, [], "no inline definitions without a redefinition");
+
+  // A same-name redefinition (e.g. an extension updated by /reload) stays native: the request-level
+  // list keeps the first definition, and the new one is added by value with the inline-tools beta.
+  const changed = { ...alpha, description: "changed" };
+  const redefined = prepareNativeTranscript(
+    [
+      ...messages,
+      { role: "system", content: "alpha changed", toolsRemoved: [{ name: "alpha" }], toolsAdded: [changed], timestamp: 6 },
+      { role: "user", content: "third", timestamp: 7 },
+    ],
+    true,
+  )!;
+  assert.ok(redefined, "redefinition no longer forces the collapsed (cache-missing) path");
+  assert.deepEqual(redefined.requestTools, plan.requestTools, "request-level tools unchanged, so the cached prefix holds");
+  assert.deepEqual(redefined.betas, [INLINE_TOOLS_BETA]);
+  assert.deepEqual(redefined.systemInjections.at(-1)?.content, [
+    { type: "text", text: "alpha changed" },
+    {
+      type: "tool_addition",
+      tool: {
+        type: "tool_definition",
+        definition: { name: `${TOOL_PREFIX}alpha`, description: "changed", input_schema: plan.requestTools[0]!.input_schema },
+      },
+    },
+  ], "no removal for the redefined name, then the new definition by value");
 });
 
 test("normalizes OpenAI replay IDs on both sides without changing saved messages", () => {
