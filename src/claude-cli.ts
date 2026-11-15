@@ -738,7 +738,11 @@ function setReplayCacheBreakpoints(messages: NativeRequestMessage[]): void {
   // system history follows it. Only the environment message (index 1) keeps its marker.
   messages.forEach((message, index) => {
     const environment = message.role === "system" && index === 1 && index < messages.length - 1;
-    if (!environment) message.content = withoutCacheControl(message.content);
+    if (environment || !Array.isArray(message.content)) return;
+    // Block level only: a cache_control key inside a tool call's input is the model's own data.
+    for (const block of message.content) {
+      if (block && typeof block === "object") delete (block as Record<string, unknown>).cache_control;
+    }
   });
   const userIndexes = messages
     .map((message, index) => (message.role === "user" ? index : -1))
