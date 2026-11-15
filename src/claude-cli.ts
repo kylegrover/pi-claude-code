@@ -734,9 +734,12 @@ function setReplayCacheBreakpoints(messages: NativeRequestMessage[]): void {
   // user message; when a system message follows it (Pi's mid-session prompt update,
   // a tool change), keeping that marker next to the final and previous-query ones
   // made five markers and a 400 ("A maximum of 4 blocks with cache_control").
-  for (const message of messages) {
-    if (message.role !== "system") message.content = withoutCacheControl(message.content);
-  }
+  // The same goes for Claude Code's own marked system tail (date reminder) once Pi's
+  // system history follows it. Only the environment message (index 1) keeps its marker.
+  messages.forEach((message, index) => {
+    const environment = message.role === "system" && index === 1 && index < messages.length - 1;
+    if (!environment) message.content = withoutCacheControl(message.content);
+  });
   const userIndexes = messages
     .map((message, index) => (message.role === "user" ? index : -1))
     .filter((index) => index >= 0);
