@@ -776,32 +776,52 @@ function countMarkers(value: unknown, key?: string): number {
 /**
  * pi-warm-compact flags the last message of the compacted part (`cacheBoundary`). A breakpoint
  * there lets requests after a light compaction, which changes only what follows it, read
- * everything before it from cache. Claude allows four breakpoints; the tools marker is the one given
- * up, since the system-prompt marker right after the tools covers them too. If that still leaves
- * more than four, the request is left as it was.
+ * everything before it from cache. Claude allows four breakpoints; the tools marker is given up
+ * first, since the system-prompt marker right after the tools covers them too.
+ *
+ * The first request after a light compaction flags two messages: the old boundary (read from
+ * cache) and the new one (written for the next light run). That request also gives up the
+ * previous-query marker: its final marker already writes everything after the old boundary. If
+ * the request would still need more than four, it is left as it was.
  */
 function setBoundaryBreakpoint(payload: { tools?: unknown; messages?: NativeRequestMessage[] }, frames: NativeFrame[]): void {
-  const frameIndex = frames.findLastIndex((frame) => frame.cacheBoundary);
   const messages = payload.messages;
-  if (frameIndex < 0 || !messages) return;
+  if (!messages) return;
   const conversation = messages.filter((message) => message.role !== "system");
   if (conversation.length !== frames.length) return;
-  const target = conversation[frameIndex];
-  if (!target || target === messages.at(-1) || !Array.isArray(target.content)) return;
-  if (target.content.some((block) => isBlock(block) && block.cache_control)) return;
-  // Not on a thinking block: put it on the last text, tool call, tool result or image.
-  const index = target.content.findLastIndex(
-    (block) => isBlock(block) && ["text", "tool_use", "tool_result", "image"].includes(String(block.type)),
-  );
-  if (index < 0) return;
-  const tools = (Array.isArray(payload.tools) ? payload.tools : []).filter(isBlock);
-  const freed = tools.filter((tool) => tool.cache_control).map((tool) => [tool, tool.cache_control] as const);
-  for (const [tool] of freed) delete tool.cache_control;
-  const block = target.content[index] as ContentBlock;
-  block.cache_control = { type: "ephemeral", ttl: "1h" };
-  if (countMarkers(payload) > 4) {
+  const flagged = frames.flatMap((frame, index) => (frame.cacheBoundary ? [index] : [])).slice(-2);
+  const placed: ContentBlock[] = [];
+  for (const frameIndex of flagged) {
+    const target = conversation[frameIndex];
+    if (!target || target === messages.at(-1) || !Array.isArray(target.content)) continue;
+    if (target.content.some((block) => isBlock(block) && block.cache_control)) continue;
+    // Not on a thinking block: put it on the last text, tool call, tool result or image.
+    const index = target.content.findLastIndex(
+      (block) => isBlock(block) && ["text", "tool_use", "tool_result", "image"].includes(String(block.type)),
+    );
+    if (index < 0) continue;
+    const block = target.content[index] as ContentBlock;
+    block.cache_control = { type: "ephemeral", ttl: "1h" };
+    placed.push(block);
+  }
+  if (placed.length === 0) return;
+  const removed: Array<readonly [ContentBlock, unknown]> = [];
+  const drop = (block: ContentBlock) => {
+    removed.push([block, block.cache_control]);
     delete block.cache_control;
-    for (const [tool, marker] of freed) tool.cache_control = marker;
+  };
+  for (const tool of (Array.isArray(payload.tools) ? payload.tools : []).filter(isBlock)) if (tool.cache_control) drop(tool);
+  // Still over four with both boundaries placed (first request after a light compaction): drop
+  // other conversation markers, oldest first; never the final message's. A single boundary never
+  // takes the previous-query marker, which normal turns need for the 20-block lookback.
+  for (const message of placed.length === 2 ? conversation : []) {
+    if (countMarkers(payload) <= 4) break;
+    if (message === messages.at(-1) || !Array.isArray(message.content)) continue;
+    for (const block of message.content) if (isBlock(block) && block.cache_control && !placed.includes(block)) drop(block);
+  }
+  if (countMarkers(payload) > 4) {
+    for (const block of placed) delete block.cache_control;
+    for (const [block, marker] of removed) block.cache_control = marker;
   }
 }
 

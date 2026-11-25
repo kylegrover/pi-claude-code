@@ -1012,3 +1012,29 @@ test("prepareFrames carries Pi's cacheBoundary flag, and the frame written to Cl
   assert.equal(frames[1]!.cacheBoundary, true);
   assert.equal(frames[0]!.cacheBoundary, undefined);
 });
+
+test("first request after a light compaction: old and new boundary marked, previous-query marker given up", () => {
+  const marker = { type: "ephemeral", ttl: "1h" };
+  const body = {
+    system: [{ type: "text", text: "billing" }, { type: "text", text: "identity" }, { type: "text", text: "prompt", cache_control: marker }],
+    tools: [{ name: "mcp__pi__bash", input_schema: { type: "object" }, cache_control: marker }],
+    messages: [
+      { role: "user", content: [{ type: "text", text: "one" }] },
+      { role: "system", content: [{ type: "text", text: "environment" }] },
+      { role: "assistant", content: [{ type: "text", text: "a1 (old boundary)" }] },
+      { role: "user", content: [{ type: "text", text: "two" }] },
+      { role: "assistant", content: [{ type: "text", text: "a2 (new boundary)" }] },
+      { role: "user", content: [{ type: "text", text: "three" }] },
+      { role: "assistant", content: [{ type: "text", text: "a3" }] },
+      { role: "user", content: [{ type: "text", text: "four", cache_control: marker }] },
+    ],
+  };
+  const frames = framesFor(body.messages).map((frame, index) => (index === 1 || index === 3 ? { ...frame, cacheBoundary: true as const } : frame));
+  const out = JSON.parse(
+    rewriteInitialRequest(Buffer.from(JSON.stringify(body)), frames, [{ role: "system", content: [{ type: "text", text: "environment", cache_control: marker }] }]).toString("utf8"),
+  ) as { tools: Block[]; system: Block[]; messages: Array<{ role: string; content: Block[] }> };
+  const marked = out.messages.flatMap((message) => message.content.filter((block) => block.cache_control).map((block) => String(block.text)));
+  assert.deepEqual(marked, ["a1 (old boundary)", "a2 (new boundary)", "four"]);
+  assert.equal(out.tools[0]!.cache_control, undefined);
+  assert.ok(out.system.at(-1)!.cache_control, "system prompt keeps its marker");
+});
