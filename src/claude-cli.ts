@@ -623,7 +623,8 @@ function processEnvironment(
 async function writeFrame(child: ChildProcess, frame: NativeFrame): Promise<string> {
   if (!child.stdin?.writable) throw new Error("Claude Code stdin closed during history replay");
   const uuid = randomUUID();
-  if (!child.stdin.write(`${JSON.stringify({ ...frame, uuid })}\n`)) {
+  const { cacheBoundary: _boundary, ...wire } = frame;
+  if (!child.stdin.write(`${JSON.stringify({ ...wire, uuid })}\n`)) {
     await new Promise<void>((resolve, reject) => {
       child.stdin!.once("drain", resolve);
       child.stdin!.once("error", reject);
@@ -761,6 +762,49 @@ function setReplayCacheBreakpoints(messages: NativeRequestMessage[]): void {
   if (final) setCacheBreakpoint(final);
 }
 
+/** Cache breakpoints in a request, not counting a tool call's own input. */
+function countMarkers(value: unknown, key?: string): number {
+  if (key === "input") return 0;
+  if (Array.isArray(value)) return value.reduce((sum: number, child) => sum + countMarkers(child), 0);
+  if (!isBlock(value)) return 0;
+  return Object.entries(value).reduce(
+    (sum: number, [name, child]) => sum + (name === "cache_control" ? 1 : countMarkers(child, name)),
+    0,
+  );
+}
+
+/**
+ * pi-warm-compact flags the last message of the compacted part (`cacheBoundary`). A breakpoint
+ * there lets requests after a light compaction, which changes only what follows it, read
+ * everything before it from cache. Claude allows four breakpoints; the tools marker is the one given
+ * up, since the system-prompt marker right after the tools covers them too. If that still leaves
+ * more than four, the request is left as it was.
+ */
+function setBoundaryBreakpoint(payload: { tools?: unknown; messages?: NativeRequestMessage[] }, frames: NativeFrame[]): void {
+  const frameIndex = frames.findLastIndex((frame) => frame.cacheBoundary);
+  const messages = payload.messages;
+  if (frameIndex < 0 || !messages) return;
+  const conversation = messages.filter((message) => message.role !== "system");
+  if (conversation.length !== frames.length) return;
+  const target = conversation[frameIndex];
+  if (!target || target === messages.at(-1) || !Array.isArray(target.content)) return;
+  if (target.content.some((block) => isBlock(block) && block.cache_control)) return;
+  // Not on a thinking block: put it on the last text, tool call, tool result or image.
+  const index = target.content.findLastIndex(
+    (block) => isBlock(block) && ["text", "tool_use", "tool_result", "image"].includes(String(block.type)),
+  );
+  if (index < 0) return;
+  const tools = (Array.isArray(payload.tools) ? payload.tools : []).filter(isBlock);
+  const freed = tools.filter((tool) => tool.cache_control).map((tool) => [tool, tool.cache_control] as const);
+  for (const [tool] of freed) delete tool.cache_control;
+  const block = target.content[index] as ContentBlock;
+  block.cache_control = { type: "ephemeral", ttl: "1h" };
+  if (countMarkers(payload) > 4) {
+    delete block.cache_control;
+    for (const [tool, marker] of freed) tool.cache_control = marker;
+  }
+}
+
 type ContentBlock = Record<string, unknown>;
 
 function isBlock(value: unknown): value is ContentBlock {
@@ -890,6 +934,7 @@ export function rewriteInitialRequest(
   const payload = JSON.parse(body.toString("utf8")) as {
     messages?: NativeRequestMessage[];
     system?: unknown;
+    tools?: unknown;
   };
   let messages = payload.messages;
   const first = messages?.[0];
@@ -919,6 +964,7 @@ export function rewriteInitialRequest(
     normalizeLeadingSystemCache(payload.system);
   }
   if (initialSystemMessages?.length || nativeSystemInjections) setReplayCacheBreakpoints(messages!);
+  setBoundaryBreakpoint(payload, frames);
 
   return Buffer.from(JSON.stringify(payload));
 }

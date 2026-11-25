@@ -39,6 +39,8 @@ export interface NativeFrame {
     content: unknown[];
   };
   shouldQuery?: false;
+  /** Pi flagged this message as the end of a compacted part (pi-warm-compact); never sent to Claude Code. */
+  cacheBoundary?: true;
 }
 
 export interface NativeResult extends JsonRecord {

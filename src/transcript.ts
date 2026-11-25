@@ -282,6 +282,8 @@ export function prepareFrames(messages: Message[]): NativeFrame[] {
     } else {
       frames.push({ type: role, message: { role, content: blocks } });
     }
+    // pi-warm-compact's flag on the last message of a compacted part (see setBoundaryBreakpoint).
+    if ((message as { cacheBoundary?: unknown }).cacheBoundary === true) frames.at(-1)!.cacheBoundary = true;
   }
 
   closeOrphanedToolUses(frames);

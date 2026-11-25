@@ -15,6 +15,7 @@ import {
   runClaudeRequest,
 } from "../src/claude-cli.ts";
 import type { NativeFrame } from "../src/native-types.ts";
+import { prepareFrames } from "../src/transcript.ts";
 import { createClaudeCodeProvider } from "../src/provider.ts";
 import { executableNodeScript } from "./helpers.ts";
 
@@ -936,4 +937,78 @@ test("keeps four breakpoints when Pi history follows Claude Code's marked system
   assert.ok(out.messages.at(-1)!.content.at(-1)!.cache_control, "final message is marked");
   const call = out.messages.find((message) => message.role === "assistant")!.content[0] as { input: Block };
   assert.deepEqual(call.input, { cache_control: "no-store" }, "a tool argument named cache_control is kept");
+});
+
+test("marks pi-warm-compact's boundary message in place of the tools marker, never over four", () => {
+  // Shape of a long session: Claude Code marks the tools and both system-prompt blocks; the
+  // replay marks the previous query and the final message. A flagged earlier message (the end
+  // of a compacted part) takes the tools marker, so requests after a light compaction read
+  // everything up to it from cache.
+  const marker = { type: "ephemeral", ttl: "1h" };
+  // Claude Code marks one system block (the prompt), as in the 11-24 capture.
+  const body = {
+    system: [
+      { type: "text", text: "billing" },
+      { type: "text", text: "identity" },
+      { type: "text", text: "prompt", cache_control: marker },
+    ],
+    tools: [{ name: "mcp__pi__bash", input_schema: { type: "object" }, cache_control: marker }],
+    messages: [
+      { role: "user", content: [{ type: "text", text: "one" }] },
+      { role: "system", content: [{ type: "text", text: "environment", cache_control: marker }] },
+      { role: "assistant", content: [{ type: "thinking", thinking: "t", signature: "s" }, { type: "text", text: "a1" }] },
+      { role: "user", content: [{ type: "text", text: "two" }] },
+      { role: "assistant", content: [{ type: "text", text: "a2" }] },
+      { role: "user", content: [{ type: "text", text: "three", cache_control: marker }] },
+    ],
+  };
+  const run = (flagged: number | undefined, request: typeof body = body) => {
+    const frames = framesFor(body.messages).map((frame, index) => (index === flagged ? { ...frame, cacheBoundary: true as const } : frame));
+    return JSON.parse(
+      rewriteInitialRequest(
+        Buffer.from(JSON.stringify(request)),
+        frames,
+        [{ role: "system", content: [{ type: "text", text: "environment", cache_control: marker }] }],
+      ).toString("utf8"),
+    ) as { tools: Block[]; messages: Array<{ role: string; content: Block[] }> };
+  };
+  const markers = (value: unknown): string[] => {
+    const found: string[] = [];
+    const walk = (node: unknown, where: string) => {
+      if (Array.isArray(node)) node.forEach((child, i) => walk(child, `${where}[${i}]`));
+      else if (node && typeof node === "object")
+        for (const [key, child] of Object.entries(node)) key === "cache_control" ? found.push(where) : walk(child, `${where}.${key}`);
+    };
+    walk(value, "");
+    return found;
+  };
+
+  const plain = run(undefined);
+  assert.ok(plain.tools[0]!.cache_control, "without a flag the tools keep their marker");
+
+  // Flag the first assistant reply (frame 1): its text block gets the marker, not its thinking.
+  const flagged = run(1);
+  const reply = flagged.messages.find((message) => message.role === "assistant")!;
+  assert.equal(reply.content[0]!.cache_control, undefined, "not on the thinking block");
+  assert.deepEqual(reply.content[1]!.cache_control, marker, "on the reply's last text block");
+  assert.equal(flagged.tools[0]!.cache_control, undefined, "the tools marker is given up");
+  assert.ok(markers(flagged).length <= 4, markers(flagged).join(" "));
+  assert.ok(flagged.messages.at(-1)!.content.at(-1)!.cache_control, "final message still marked");
+
+  // If Claude Code marked a second system block, a fifth marker is not added: request unchanged.
+  const twoSystem = { ...body, system: body.system.map((block) => (block.text === "identity" ? { ...block, cache_control: marker } : block)) };
+  assert.deepEqual(run(1, twoSystem), run(undefined, twoSystem));
+
+  // The final message itself needs nothing extra.
+  assert.deepEqual(markers(run(framesFor(body.messages).length - 1)), markers(plain));
+});
+
+test("prepareFrames carries Pi's cacheBoundary flag, and the frame written to Claude Code drops it", () => {
+  const frames = prepareFrames([
+    { role: "user", content: "one", timestamp: 1 },
+    { role: "assistant", content: [{ type: "text", text: "a1" }], api: "x", provider: "x", model: "x", usage: {} as never, stopReason: "stop", timestamp: 2, cacheBoundary: true } as never,
+    { role: "user", content: "two", timestamp: 3 },
+  ]);
+  assert.equal(frames[1]!.cacheBoundary, true);
+  assert.equal(frames[0]!.cacheBoundary, undefined);
 });
